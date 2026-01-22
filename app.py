@@ -135,7 +135,7 @@ def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
 
     tolerance_date = week_end + pd.Timedelta(days=tolerance_days)
 
-    def status(row):
+def status(row):
     if row["REQ"] <= row["INV"]:
         return "OK"
 
