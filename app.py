@@ -1,3 +1,13 @@
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.upper()
+        .str.replace(" ", "_")
+    )
+    return df
+
 import json
 from datetime import date
 from dateutil.parser import parse as dtparse
@@ -41,7 +51,11 @@ def read_sheet_csv(spreadsheet_id: str, tab_name: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=10)
 def load_all_tabs(spreadsheet_id: str) -> dict:
-    return {k: read_sheet_csv(spreadsheet_id, v) for k, v in SHEETS_TABS.items()}
+    data = {}
+    for k, v in SHEETS_TABS.items():
+        df = read_sheet_csv(spreadsheet_id, v)
+        data[k] = normalize_columns(df)
+    return data
 
 
 # =========================
