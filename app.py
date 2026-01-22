@@ -189,15 +189,23 @@ Formato:
 """
 
 
-def ia_decide(row):
-    if row["ESTADO_EMPAQUE"] == "BLOQUEADO":
-        return {
-            "decision": "NO_PRODUCIR",
-            "razon": "Empaque bloqueado",
-            "confianza": 1.0,
-        }
+@st.cache_resource
+def get_openai_client():
+    # Prioridad: secrets -> env var
+    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    return OpenAI(api_key=api_key)
 
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+def ia_decide(row):
+    # Regla dura
+    if row.get("Estado_Empaque") == "BLOQUEADO":
+        return {"decision": "NO_PRODUCIR", "razon": "Empaque bloqueado", "confianza": 1.0}
+
+    client = get_openai_client()
+    if client is None:
+        # No revienta el demo si falta la key
+        return {"decision": "NO_DISPONIBLE", "razon": "Falta OPENAI_API_KEY en secrets/env", "confianza": 0.0}
 
     resp = client.chat.completions.create(
         model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
@@ -208,7 +216,6 @@ def ia_decide(row):
         ],
         response_format={"type": "json_object"},
     )
-
     return json.loads(resp.choices[0].message.content)
 
 
