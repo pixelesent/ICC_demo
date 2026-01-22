@@ -138,7 +138,7 @@ def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
     def status(row):
         if row["REQ"] <= row["INV"]:
             return "OK"
-        if row["ETA"] and row["ETA"] <= tolerance_date.date():
+        if row["ETA"] and row["ETA"] <= tolerance_date:
             if row["INV"] + row["WIP"] >= row["REQ"]:
                 return "RIESGO"
         return "BLOQUEADO"
