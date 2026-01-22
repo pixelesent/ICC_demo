@@ -95,7 +95,7 @@ def net_demand(demanda, pt):
 
 
 def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
-    bom["Qty"] = bom["Cantidad_por_unidad"].apply(to_float)
+    bom["Qty"] = bom["CANTIDAD_POR_UNIDAD"].apply(to_float)
     comp["Inv"] = comp["Inventario"].apply(to_int)
     comp["WIP"] = comp["En_Proceso"].apply(to_int)
     comp["ETA"] = comp["Fecha_Estimada"].apply(to_date_safe)
