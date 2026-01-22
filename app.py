@@ -136,12 +136,17 @@ def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
     tolerance_date = week_end + pd.Timedelta(days=tolerance_days)
 
     def status(row):
-        if row["REQ"] <= row["INV"]:
-            return "OK"
-        if row["ETA"] and row["ETA"] <= tolerance_date:
+    if row["REQ"] <= row["INV"]:
+        return "OK"
+
+    eta = row["ETA"]
+
+    if pd.notna(eta):
+        if eta <= tolerance_date:
             if row["INV"] + row["WIP"] >= row["REQ"]:
                 return "RIESGO"
-        return "BLOQUEADO"
+
+    return "BLOQUEADO"
 
     exp["ESTADO"] = exp.apply(status, axis=1)
 
