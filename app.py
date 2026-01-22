@@ -72,16 +72,11 @@ def to_date_safe(x):
 # CORE LOGIC
 # =========================
 def consolidate_weekly_demand(pedidos, start, end):
-    pedidos["Fecha_dt"] = pedidos["Fecha_Requerida"].apply(to_date_safe)
-    pedidos["Cantidad_num"] = pedidos["Cantidad"].apply(to_int)
-
-    df = pedidos[
-        (pedidos["Fecha_dt"] >= start) &
-        (pedidos["Fecha_dt"] <= end)
-    ]
+    pedidos["Cantidad_num"] = pedidos["CANTIDAD"].apply(to_int)
 
     return (
-        df.groupby("SKU", as_index=False)["Cantidad_num"]
+        pedidos
+        .groupby("SKU", as_index=False)["Cantidad_num"]
         .sum()
         .rename(columns={"Cantidad_num": "Demanda_Bruta"})
     )
