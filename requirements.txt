@@ -1,5 +1,6 @@
-streamlit==1.37.1
-pandas==2.2.2
-numpy==2.0.1
-openai==1.40.6
-python-dateutil==2.9.0.post0
+streamlit>=1.32.0
+pandas>=2.1.0
+gspread>=6.0.0
+google-auth>=2.25.0
+openai>=1.0.0
+python-dateutil>=2.8.2
