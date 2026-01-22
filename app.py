@@ -1,3 +1,11 @@
+from openai import OpenAI
+
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+
+openai_client = OpenAI(
+    api_key=OPENAI_API_KEY
+)
+
 from dateutil.parser import parse as dtparse
 
 def to_date_safe(x):
@@ -216,25 +224,32 @@ def get_openai_client():
     return OpenAI(api_key=api_key)
 
 def ia_decide(row):
-    # Regla dura
-    if row.get("Estado_Empaque") == "BLOQUEADO":
-        return {"decision": "NO_PRODUCIR", "razon": "Empaque bloqueado", "confianza": 1.0}
+    if row["ESTADO_EMPAQUE"] == "BLOQUEADO":
+        return {
+            "decision": "NO_PRODUCIR",
+            "razon": "Empaque bloqueado",
+            "confianza": 1.0,
+        }
 
-    client = get_openai_client()
-    if client is None:
-        # No revienta el demo si falta la key
-        return {"decision": "NO_DISPONIBLE", "razon": "Falta OPENAI_API_KEY en secrets/env", "confianza": 0.0}
+    try:
+        resp = openai_client.chat.completions.create(
+            model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": IA_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(row.to_dict())},
+            ],
+            response_format={"type": "json_object"},
+        )
 
-    resp = client.chat.completions.create(
-        model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": IA_SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(row.to_dict())},
-        ],
-        response_format={"type": "json_object"},
-    )
-    return json.loads(resp.choices[0].message.content)
+        return json.loads(resp.choices[0].message.content)
+
+    except Exception as e:
+        return {
+            "decision": "NO_DISPONIBLE",
+            "razon": str(e),
+            "confianza": 0.0,
+        }
 
 
 # =========================
