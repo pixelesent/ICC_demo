@@ -1,3 +1,11 @@
+from dateutil.parser import parse as dtparse
+
+def to_date_safe(x):
+    try:
+        return dtparse(str(x)).date()
+    except Exception:
+        return None
+
 # =========================
 # IMPORTS
 # =========================
