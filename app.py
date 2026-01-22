@@ -72,7 +72,7 @@ def gs_client():
     return gspread.authorize(creds)
 
 def load_sheets():
-    sh = gs_client().open_by_key(st.secrets["GSHEETS_SPREADSHEET_ID"])
+    sh = gs_client().open_by_key(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
     titles = [w.title for w in sh.worksheets()]
     for r in REQUIRED_SHEETS:
         if r not in titles:
