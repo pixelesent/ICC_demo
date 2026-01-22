@@ -1,320 +1,251 @@
-import streamlit as st
+# ===========================
+# app.py — DEMO FUNCIONAL
+# Planificación Semanal Asistida por IA (Industria Cosmética)
+# ===========================
+
 import json
-from openai import OpenAI
-
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-
-openai_client = OpenAI(
-    api_key=OPENAI_API_KEY
-)
-
-from dateutil.parser import parse as dtparse
-
-def to_date_safe(x):
-    try:
-        return dtparse(str(x)).date()
-    except Exception:
-        return None
-
-# =========================
-# IMPORTS
-# =========================
-import json
-from datetime import date
+from datetime import date, timedelta
 from dateutil.parser import parse as dtparse
 
 import pandas as pd
-import numpy as np
 import streamlit as st
+
+import gspread
+from google.oauth2.service_account import Credentials
 from openai import OpenAI
 
+# ---------------- CONFIG ----------------
+REQUIRED_SHEETS = [
+    "PRODUCTOS_TERMINADOS",
+    "COMPONENTES_EMPAQUE",
+    "MATERIAS_PRIMAS",
+    "PEDIDOS_CLIENTES",
+    "HISTORIAL_VENTAS",
+    "BOM_EMPAQUE",
+    "FORMULA_MP",
+    "MEZCLADORAS",
+    "LLENADORAS",
+]
+TOLERANCE_DAYS = 2
 
-# =========================
-# CONFIG
-# =========================
-SPREADSHEET_ID = st.secrets["GSPREAD_SHEET_ID"]
-
-SHEETS = {
-    "PRODUCTOS_TERMINADOS": "PRODUCTOS_TERMINADOS",
-    "COMPONENTES_EMPAQUE": "COMPONENTES_EMPAQUE",
-    "MATERIAS_PRIMAS": "MATERIAS_PRIMAS",
-    "BOM_EMPAQUE": "BOM_EMPAQUE",
-    "FORMULA_MP": "FORMULA_MP",
-    "PEDIDOS_CLIENTES": "PEDIDOS_CLIENTES",
-    "HISTORIAL_VENTAS": "HISTORIAL_VENTAS",
-    "MEZCLADORAS": "MEZCLADORAS",
-    "LLENADORAS": "LLENADORAS",
-}
-
-DEFAULT_TOLERANCE_DAYS = 3
-
-
-# =========================
-# DATA LOADING (CSV PUBLIC)
-# =========================
-def read_sheet(tab: str) -> pd.DataFrame:
-    url = (
-        f"https://docs.google.com/spreadsheets/d/"
-        f"{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={tab}"
-    )
-    return pd.read_csv(url)
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.upper()
-        .str.replace(" ", "_")
-    )
-    return df
-
-
-@st.cache_data(ttl=30)
-def load_all():
-    data = {}
-    for k, tab in SHEETS.items():
-        data[k] = normalize_columns(read_sheet(tab))
-    return data
-
-
-# =========================
-# SAFE CASTS
-# =========================
-def to_int(x, default=0):
+# ---------------- HELPERS ----------------
+def to_int(x, d=0):
     try:
-        return int(float(str(x).replace(",", "")))
-    except Exception:
-        return default
+        return int(float(x))
+    except:
+        return d
 
-
-def to_float(x, default=0.0):
+def to_float(x, d=0.0):
     try:
-        return float(str(x).replace(",", ""))
-    except Exception:
-        return default
-
+        return float(x)
+    except:
+        return d
 
 def to_date(x):
     try:
         return dtparse(str(x)).date()
-    except Exception:
+    except:
         return None
 
+def week_bounds(d):
+    start = d - timedelta(days=d.weekday())
+    end = start + timedelta(days=6)
+    return start, end
 
-# =========================
-# CORE LOGIC
-# =========================
-def consolidate_weekly_demand(pedidos, start, end):
-    pedidos["FECHA_INGRESO"] = pedidos["FECHA_INGRESO"].apply(to_date)
-    pedidos["CANTIDAD_NUM"] = pedidos["CANTIDAD"].apply(to_int)
+# ---------------- GSHEETS ----------------
+@st.cache_resource
+def gs_client():
+    sa = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(sa, scopes=scopes)
+    return gspread.authorize(creds)
 
-    mask = (pedidos["FECHA_INGRESO"] >= start) & (pedidos["FECHA_INGRESO"] <= end)
+@st.cache_data(ttl=30)
+def load_sheets():
+    sh = gs_client().open_by_key(st.secrets["GSHEETS_SPREADSHEET_ID"])
+    titles = [w.title for w in sh.worksheets()]
+    for r in REQUIRED_SHEETS:
+        if r not in titles:
+            raise RuntimeError(f"Falta pestaña {r}")
+    out = {}
+    for r in REQUIRED_SHEETS:
+        out[r] = pd.DataFrame(sh.worksheet(r).get_all_records())
+    return out
 
-    return (
-        pedidos.loc[mask]
-        .groupby("SKU", as_index=False)["CANTIDAD_NUM"]
-        .sum()
-        .rename(columns={"CANTIDAD_NUM": "DEMANDA_BRUTA"})
+# ---------------- CORE ----------------
+def consolidate_orders(ped, ws, we):
+    df = ped.copy()
+    df["FECHA_INGRESO"] = df["FECHA_INGRESO"].apply(to_date)
+    df = df[(df["FECHA_INGRESO"] >= ws) & (df["FECHA_INGRESO"] <= we)]
+    if df.empty:
+        return pd.DataFrame(columns=["SKU", "Demanda_Bruta"])
+    df["CANTIDAD"] = df["CANTIDAD"].apply(to_int)
+    return df.groupby("SKU", as_index=False).agg(
+        Demanda_Bruta=("CANTIDAD", "sum")
     )
 
-
-def net_demand(demanda, pt):
-    pt["INVENTARIO_NUM"] = pt["INVENTARIO"].apply(to_int)
-
-    df = demanda.merge(
-        pt[["SKU", "INVENTARIO_NUM"]],
-        on="SKU",
-        how="left",
+def net_demand(dem, pt):
+    base = dem.merge(
+        pt[["SKU", "Inventario"]],
+        on="SKU", how="left"
     )
+    base["Inventario"] = base["Inventario"].fillna(0).apply(to_int)
+    base["Demanda_Neta"] = (base["Demanda_Bruta"] - base["Inventario"]).clip(lower=0)
+    return base
 
-    df["INVENTARIO_NUM"] = df["INVENTARIO_NUM"].fillna(0)
-    df["DEMANDA_NETA"] = (df["DEMANDA_BRUTA"] - df["INVENTARIO_NUM"]).clip(lower=0)
+def explode_packaging(dn, bom, ce, we):
+    if dn.empty:
+        return pd.DataFrame(columns=["SKU", "Estado_Empaque", "Detalle_Empaque"])
 
-    return df
+    m = bom.merge(dn[["SKU", "Demanda_Neta"]], on="SKU")
+    m["Req"] = m["CANTIDAD_POR_UNIDAD"].apply(to_float) * m["Demanda_Neta"]
+    req = m.groupby("COMPONENTE_ID", as_index=False)["Req"].sum()
 
+    ce2 = ce.copy()
+    ce2["Inventario"] = ce2["Inventario"].apply(to_int)
+    ce2["En_Proceso"] = ce2["En_Proceso"].apply(to_int)
+    ce2["Fecha_Estimada"] = ce2["Fecha_Estimada"].apply(to_date)
 
-def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
-    bom = bom.copy()
-    comp = comp.copy()
+    comp = req.merge(
+        ce2[["Componente_ID", "Inventario", "En_Proceso", "Fecha_Estimada"]],
+        on="Componente_ID", how="left"
+    ).fillna({"Inventario": 0, "En_Proceso": 0})
 
-    bom["QTY"] = bom["CANTIDAD_POR_UNIDAD"].apply(to_float)
-    comp["INV"] = comp["INVENTARIO"].apply(to_int)
-    comp["WIP"] = comp["EN_PROCESO"].apply(to_int)
-    comp["ETA"] = comp["FECHA_ESTIMADA"].apply(to_date_safe)
+    tol_end = we + timedelta(days=TOLERANCE_DAYS)
 
-    exp = demanda.merge(bom, on="SKU", how="left")
-
-    if exp.empty:
-        return pd.DataFrame(columns=["SKU", "ESTADO_EMPAQUE"])
-
-    exp["REQ"] = exp["DEMANDA_NETA"] * exp["QTY"]
-
-    exp = exp.merge(
-        comp[["COMPONENTE_ID", "INV", "WIP", "ETA"]],
-        on="COMPONENTE_ID",
-        how="left",
-    )
-
-    tolerance_date = week_end + pd.Timedelta(days=tolerance_days)
-
-    def status(row):
-        if row["REQ"] <= row["INV"]:
+    def status(r):
+        if r["Inventario"] >= r["Req"]:
             return "OK"
-
-        if pd.notna(row["ETA"]) and row["ETA"] <= tolerance_date:
-            if row["INV"] + row["WIP"] >= row["REQ"]:
+        if (r["Inventario"] + r["En_Proceso"]) >= r["Req"]:
+            if r["Fecha_Estimada"] and r["Fecha_Estimada"] <= we:
+                return "OK"
+            if r["Fecha_Estimada"] and r["Fecha_Estimada"] <= tol_end:
                 return "RIESGO"
-
         return "BLOQUEADO"
 
-    exp["ESTADO"] = exp.apply(status, axis=1)
+    comp["Estado"] = comp.apply(status, axis=1)
 
-    sku_status = (
-        exp.groupby("SKU")["ESTADO"]
-        .apply(
-            lambda x: "BLOQUEADO"
-            if "BLOQUEADO" in x.values
-            else "RIESGO"
-            if "RIESGO" in x.values
-            else "OK"
-        )
-        .reset_index()
-        .rename(columns={"ESTADO": "ESTADO_EMPAQUE"})
+    sku_comp = m[["SKU", "COMPONENTE_ID"]].drop_duplicates().merge(
+        comp[["Componente_ID", "Estado"]],
+        on="Componente_ID", how="left"
     )
 
-    return sku_status
+    sev = {"OK": 0, "RIESGO": 1, "BLOQUEADO": 2}
+    sku_comp["sev"] = sku_comp["Estado"].map(sev)
+    out = sku_comp.groupby("SKU", as_index=False)["sev"].max()
+    out["Estado_Empaque"] = out["sev"].map({0: "OK", 1: "RIESGO", 2: "BLOQUEADO"})
 
+    det = sku_comp.sort_values("sev", ascending=False).groupby("SKU").head(2)
+    det = det.groupby("SKU")["COMPONENTE_ID"].apply(lambda s: ", ".join(s)).reset_index(name="Detalle_Empaque")
 
-def compute_cem(hist):
-    hist["UNIDADES_NUM"] = hist["UNIDADES_VENDIDAS"].apply(to_float)
+    return out.merge(det, on="SKU", how="left")
 
-    return (
-        hist.groupby("SKU", as_index=False)["UNIDADES_NUM"]
-        .mean()
-        .rename(columns={"UNIDADES_NUM": "CEM"})
+def calc_cem(hv):
+    df = hv.copy()
+    df["Fecha"] = df["Fecha"].apply(to_date)
+    df["Unidades_vendidas"] = df["Unidades_vendidas"].apply(to_int)
+    df = df[df["Fecha"].notna()]
+    if df.empty:
+        return pd.DataFrame(columns=["SKU", "CEM"])
+    df["YM"] = df["Fecha"].apply(lambda d: f"{d.year}-{d.month:02d}")
+    m = df.groupby(["SKU", "YM"], as_index=False)["Unidades_vendidas"].sum()
+    return m.groupby("SKU", as_index=False)["Unidades_vendidas"].mean().rename(
+        columns={"Unidades_vendidas": "CEM"}
     )
 
+# ---------------- IA ----------------
+def ai_decide(rows):
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    payload = rows.to_dict(orient="records")
+    system = st.session_state["AI_SYSTEM"]
 
-# =========================
-# IA
-# =========================
-IA_SYSTEM_PROMPT = """
-Eres un ingeniero senior de planificación en industria cosmética.
+    resp = client.responses.create(
+        model="gpt-4.1-mini",
+        instructions=system,
+        input=json.dumps({"items": payload}, ensure_ascii=False)
+    )
 
-Reglas:
-- Nunca producir si Estado_Empaque = BLOQUEADO
-- Usa criterio humano
-- Devuelve SOLO JSON
+    data = json.loads(resp.output_text)
+    return pd.DataFrame(data["decisions"])
 
-Formato:
+# ---------------- UI ----------------
+st.set_page_config(layout="wide")
+st.title("🧠 Planificación Semanal Asistida por IA – Demo Cosmética")
+
+# -------- PROMPT IA FINAL (AQUÍ VIVE LA IA) --------
+if "AI_SYSTEM" not in st.session_state:
+    st.session_state["AI_SYSTEM"] = """
+Eres un ingeniero senior de planificación semanal en la industria cosmética.
+
+Tu función NO es calcular, NO es optimizar y NO es romper restricciones.
+Tu función es DECIDIR con criterio humano cuando existe ambigüedad operativa.
+
+REGLAS DURAS (INVIOLABLES):
+- Si Estado_Empaque = "BLOQUEADO" → decision = "NO_PRODUCIR".
+- Si Demanda_Neta = 0 → decision = "NO_PRODUCIR".
+- No inventes datos, fechas ni cantidades.
+- No cambies resultados determinísticos.
+
+ZONAS GRISES:
+- Si Estado_Empaque = "RIESGO":
+  - Puedes decidir "PRODUCIR_CON_RIESGO" si la prioridad implícita y el contexto lo justifican.
+  - Puedes decidir "NO_PRODUCIR" si el riesgo operativo supera el beneficio.
+- Si Estado_Empaque = "OK":
+  - Normalmente decide "PRODUCIR", salvo que exista una razón lógica para no hacerlo.
+
+CRITERIOS A CONSIDERAR (SIN CALCULAR):
+- Demanda_Neta vs CEM
+- Riesgo de llegada de empaque
+- Impacto operativo
+- Criterio conservador típico de un ingeniero senior
+
+SALIDA:
+Devuelve SOLO JSON válido, sin texto adicional:
+
 {
-  "decision": "PRODUCIR" | "PRODUCIR_CON_RIESGO" | "NO_PRODUCIR",
-  "razon": "string corto",
-  "confianza": 0.0-1.0
+  "decisions": [
+    {
+      "sku": "string",
+      "decision": "PRODUCIR | PRODUCIR_CON_RIESGO | NO_PRODUCIR",
+      "reason": "justificación corta, humana y clara",
+      "confidence": 0.0-1.0
+    }
+  ]
 }
-"""
+""".strip()
 
+# -------- LOAD DATA --------
+sheets = load_sheets()
 
-@st.cache_resource
-def get_openai_client():
-    # Prioridad: secrets -> env var
-    api_key = st.secrets.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    return OpenAI(api_key=api_key)
+today = st.date_input("Semana de referencia", date.today())
+ws, we = week_bounds(today)
 
-def ia_decide(row):
-    if row["ESTADO_EMPAQUE"] == "BLOQUEADO":
-        return {
-            "decision": "NO_PRODUCIR",
-            "razon": "Empaque bloqueado",
-            "confianza": 1.0,
-        }
+if st.button("🚀 Ejecutar planificación semanal"):
+    dem = consolidate_orders(sheets["PEDIDOS_CLIENTES"], ws, we)
+    net = net_demand(dem, sheets["PRODUCTOS_TERMINADOS"])
+    pack = explode_packaging(net, sheets["BOM_EMPAQUE"], sheets["COMPONENTES_EMPAQUE"], we)
+    cem = calc_cem(sheets["HISTORIAL_VENTAS"])
 
-    try:
-        resp = openai_client.chat.completions.create(
-            model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": IA_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(row.to_dict())},
-            ],
-            response_format={"type": "json_object"},
-        )
+    plan = net.merge(pack, on="SKU", how="left").merge(cem, on="SKU", how="left")
+    plan["CEM"] = plan["CEM"].fillna(0)
 
-        return json.loads(resp.choices[0].message.content)
+    decisions = ai_decide(plan[[
+        "SKU", "Demanda_Neta", "Estado_Empaque", "Detalle_Empaque", "CEM"
+    ]])
 
-    except Exception as e:
-        return {
-            "decision": "NO_DISPONIBLE",
-            "razon": str(e),
-            "confianza": 0.0,
-        }
-
-
-# =========================
-# STREAMLIT UI
-# =========================
-st.set_page_config(page_title="Demo Planificación IA", layout="wide")
-st.title("🧪 Demo Planificación Semanal Asistida – ICC")
-
-with st.sidebar:
-    start = st.date_input("Inicio semana", value=date.today())
-    end = st.date_input("Fin semana", value=date.today())
-    tolerance = st.number_input(
-        "Tolerancia empaque (días)",
-        0,
-        14,
-        DEFAULT_TOLERANCE_DAYS,
-    )
-    run = st.button("Ejecutar planificación", type="primary")
-
-if run:
-    data = load_all()
-
-    demanda_bruta = consolidate_weekly_demand(
-        data["PEDIDOS_CLIENTES"], start, end
-    )
-
-    demanda_neta = net_demand(
-        demanda_bruta, data["PRODUCTOS_TERMINADOS"]
-    )
-
-    empaque = packaging_explosion(
-        demanda_neta,
-        data["BOM_EMPAQUE"],
-        data["COMPONENTES_EMPAQUE"],
-        end,
-        tolerance,
-    )
-
-    cem = compute_cem(data["HISTORIAL_VENTAS"])
-
-    out = (
-        demanda_neta
-        .merge(empaque, on="SKU")
-        .merge(cem, on="SKU", how="left")
-    )
-
-    decisions = out.apply(ia_decide, axis=1)
-    out["DECISION_IA"] = decisions.apply(lambda x: x["decision"])
-    out["RAZON_IA"] = decisions.apply(lambda x: x["razon"])
-    out["CONFIANZA"] = decisions.apply(lambda x: x["confianza"])
+    out = plan.merge(decisions, on="SKU", how="left")
 
     st.dataframe(
-        out[
-            [
-                "SKU",
-                "DEMANDA_NETA",
-                "ESTADO_EMPAQUE",
-                "DECISION_IA",
-                "RAZON_IA",
-                "CONFIANZA",
-            ]
-        ],
+        out[[
+            "SKU",
+            "Demanda_Neta",
+            "Estado_Empaque",
+            "decision",
+            "reason",
+            "confidence",
+        ]],
         use_container_width=True,
     )
-else:
-    st.info("Presiona **Ejecutar planificación** para correr el demo.")
