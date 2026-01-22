@@ -190,7 +190,7 @@ def ia_decide(row):
 # STREAMLIT UI
 # =========================
 st.set_page_config(page_title="Demo Planificación IA", layout="wide")
-st.title("🧪 Planificación Semanal Asistida por IA")
+st.title("🧪 Demo Planificación Semanal Asistida - ICCUSCATLAN")
 
 with st.sidebar:
     start = st.date_input("Inicio semana", value=date.today())
