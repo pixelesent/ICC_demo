@@ -102,7 +102,7 @@ def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
 
     exp = demanda.merge(bom, on="SKU", how="left")
     exp["Req"] = exp["Demanda_Neta"] * exp["Qty"]
-    exp = exp.merge(comp, on="Componente", how="left")
+    exp = exp.merge(comp, left_on="COMPONENTE_ID", right_on="COMPONENTE_ID", how="left")
 
     tolerance_date = week_end + pd.Timedelta(days=tolerance_days)
 
