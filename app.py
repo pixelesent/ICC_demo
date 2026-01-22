@@ -118,13 +118,19 @@ def net_demand(demanda, pt):
 
 
 def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
-    bom["QTY"] = bom["CANTIDAD_POR_UNIDAD"].apply(to_float)
+    bom = bom.copy()
+    comp = comp.copy()
 
+    bom["QTY"] = bom["CANTIDAD_POR_UNIDAD"].apply(to_float)
     comp["INV"] = comp["INVENTARIO"].apply(to_int)
     comp["WIP"] = comp["EN_PROCESO"].apply(to_int)
-    comp["ETA"] = comp["FECHA_ESTIMADA"].apply(to_date)
+    comp["ETA"] = comp["FECHA_ESTIMADA"].apply(to_date_safe)
 
     exp = demanda.merge(bom, on="SKU", how="left")
+
+    if exp.empty:
+        return pd.DataFrame(columns=["SKU", "ESTADO_EMPAQUE"])
+
     exp["REQ"] = exp["DEMANDA_NETA"] * exp["QTY"]
 
     exp = exp.merge(
@@ -135,33 +141,32 @@ def packaging_explosion(demanda, bom, comp, week_end, tolerance_days):
 
     tolerance_date = week_end + pd.Timedelta(days=tolerance_days)
 
-def status(row):
-    if row["REQ"] <= row["INV"]:
-        return "OK"
+    def status(row):
+        if row["REQ"] <= row["INV"]:
+            return "OK"
 
-    eta = row["ETA"]
-
-    if pd.notna(eta):
-        if eta <= tolerance_date:
+        if pd.notna(row["ETA"]) and row["ETA"] <= tolerance_date:
             if row["INV"] + row["WIP"] >= row["REQ"]:
                 return "RIESGO"
 
-    return "BLOQUEADO"
+        return "BLOQUEADO"
 
     exp["ESTADO"] = exp.apply(status, axis=1)
 
-    resumen = []
-    for sku, g in exp.groupby("SKU"):
-        estados = set(g["ESTADO"])
-        if "BLOQUEADO" in estados:
-            final = "BLOQUEADO"
-        elif "RIESGO" in estados:
-            final = "RIESGO"
-        else:
-            final = "OK"
-        resumen.append({"SKU": sku, "ESTADO_EMPAQUE": final})
+    sku_status = (
+        exp.groupby("SKU")["ESTADO"]
+        .apply(
+            lambda x: "BLOQUEADO"
+            if "BLOQUEADO" in x.values
+            else "RIESGO"
+            if "RIESGO" in x.values
+            else "OK"
+        )
+        .reset_index()
+        .rename(columns={"ESTADO": "ESTADO_EMPAQUE"})
+    )
 
-    return pd.DataFrame(resumen)
+    return sku_status
 
 
 def compute_cem(hist):
