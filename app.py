@@ -73,7 +73,7 @@ def to_int(x, default=0):
 
 def to_float(x, default=0.0):
     try:
-        return float(str(x).replace(",", "")))
+        return float(str(x).replace(",", ""))
     except Exception:
         return default
 
