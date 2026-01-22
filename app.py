@@ -53,29 +53,24 @@ def week_bounds(d):
     return start, end
 
 # ---------------- GSHEETS ----------------
-@st.cache_resource
 def gs_client():
     secret = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
-    # ✅ Caso 1: ya viene como dict (Streamlit lo parseó)
+    # Streamlit puede entregar dict, string, o cosa rara
     if isinstance(secret, dict):
         sa = secret
-
-    # ✅ Caso 2: viene como string JSON
-    elif isinstance(secret, str):
-        sa = json.loads(secret)
-
     else:
-        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON tiene un formato inválido")
+        # fuerza a string limpio
+        sa = json.loads(str(secret))
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
+
     creds = Credentials.from_service_account_info(sa, scopes=scopes)
     return gspread.authorize(creds)
 
-@st.cache_data(ttl=30)
 def load_sheets():
     sh = gs_client().open_by_key(st.secrets["GSHEETS_SPREADSHEET_ID"])
     titles = [w.title for w in sh.worksheets()]
