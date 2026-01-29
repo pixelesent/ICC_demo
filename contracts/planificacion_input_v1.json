@@ -1,0 +1,12 @@
+{
+  "week_start": {{1.week_start}},
+  "week_end": {{1.week_end}},
+  "demanda": {{56.array}},
+  "productos_terminados": {{42.array}},
+  "componentes_empaque": {{44.array}},
+  "bom_empaque": {{48.array}},
+  "materias_primas": {{46.array}},
+  "formula_mp": {{50.array}},
+  "mezcladoras": {{52.array}},
+  "llenadoras": {{54.array}}
+}
