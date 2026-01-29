@@ -144,3 +144,71 @@ def planificacion_semanal(data: BackendInput):
         "week_end": data.week_end,
         "resultado": produccion
     }
+
+# -------------------------------------------------
+# ENDPOINT DRY-RUN (VALIDACIÓN ESTRUCTURAL)
+# -------------------------------------------------
+
+@app.post("/planificacion/dry-run")
+def planificacion_dry_run(data: BackendInput):
+
+    # SKUs demandados
+    skus_demandados = {d.SKU for d in data.demanda}
+
+    # Índices básicos
+    skus_con_bom = {b["SKU"] for b in data.bom_empaque if "SKU" in b}
+    skus_con_formula = {f["SKU"] for f in data.formula_mp if "SKU" in f}
+
+    # Familias por SKU
+    familias_por_sku = {}
+    for p in data.productos_terminados:
+        sku = p.get("SKU")
+        fam = p.get("Familia")
+        if sku:
+            familias_por_sku[sku] = fam
+
+    # Familias compatibles
+    familias_mezcladoras = set()
+    for m in data.mezcladoras:
+        fam = m.get("Familias_compatibles")
+        if fam:
+            familias_mezcladoras.add(fam)
+
+    familias_llenadoras = set()
+    for l in data.llenadoras:
+        fam = l.get("Familias_compatibles")
+        if fam:
+            familias_llenadoras.add(fam)
+
+    # Validaciones
+    skus_sin_bom = list(skus_demandados - skus_con_bom)
+    skus_sin_formula = list(skus_demandados - skus_con_formula)
+
+    skus_sin_mezcladora = []
+    skus_sin_llenadora = []
+
+    for sku in skus_demandados:
+        fam = familias_por_sku.get(sku)
+        if fam and fam not in familias_mezcladoras:
+            skus_sin_mezcladora.append(sku)
+        if fam and fam not in familias_llenadoras:
+            skus_sin_llenadora.append(sku)
+
+    return {
+        "status": "ok",
+        "modo": "dry-run",
+        "week": {
+            "start": data.week_start,
+            "end": data.week_end
+        },
+        "resumen": {
+            "skus_demandados": len(skus_demandados),
+            "skus_sin_bom_empaque": skus_sin_bom,
+            "skus_sin_formula_mp": skus_sin_formula,
+            "skus_sin_mezcladora_compatible": skus_sin_mezcladora,
+            "skus_sin_llenadora_compatible": skus_sin_llenadora,
+            "mezcladoras_disponibles": len(data.mezcladoras),
+            "llenadoras_disponibles": len(data.llenadoras)
+        },
+        "nota": "Dry-run activo. No se ejecutaron cálculos de producción."
+    }
