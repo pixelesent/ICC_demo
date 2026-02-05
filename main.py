@@ -1,156 +1,302 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List, Dict, Any
-from datetime import date
+import os
 import logging
-import time
+import asyncio
+from datetime import date
+from typing import List, Dict, Any, Optional
+from uuid import UUID
 
-# -------------------------------------------------
-# APP + LOGGING
-# -------------------------------------------------
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from supabase import create_client, Client
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
-log = logging.getLogger("ICC-DEMO")
+# ----------------------------
+# LOGGING (visible en Render)
+# ----------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("icc-demo")
 
-app = FastAPI(
-    title="ICC Demo – Motor de Planificación (SAFE DEMO)",
-    version="0.2-demo-safe"
-)
+# ----------------------------
+# SUPABASE CLIENT
+# ----------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# -------------------------------------------------
-# MODELOS
-# -------------------------------------------------
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars")
 
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+# ----------------------------
+# FASTAPI
+# ----------------------------
+app = FastAPI(title="ICC Demo – Motor de Planificación", version="1.0")
+
+# ----------------------------
+# INPUT MODELS (Make -> Backend)
+# ----------------------------
 class DemandaSKU(BaseModel):
-    SKU: str
-    demanda_bruta: int
+    SKU: str = Field(..., min_length=1)
+    demanda_bruta: int = Field(..., ge=0)
 
-
-class BackendInput(BaseModel):
+class BackendInputMin(BaseModel):
     week_start: date
     week_end: date
-
     demanda: List[DemandaSKU]
 
-    productos_terminados: List[Dict[str, Any]]
-    componentes_empaque: List[Dict[str, Any]]
-    bom_empaque: List[Dict[str, Any]]
-
-    # ⚠️ se reciben pero NO se procesan en demo
-    materias_primas: List[Dict[str, Any]]
-    formula_mp: List[Dict[str, Any]]
-    mezcladoras: List[Dict[str, Any]]
-    llenadoras: List[Dict[str, Any]]
-
-# -------------------------------------------------
+# ----------------------------
 # HELPERS
-# -------------------------------------------------
+# ----------------------------
+def index_by_key(rows: List[Dict[str, Any]], key: str) -> Dict[str, Dict[str, Any]]:
+    out = {}
+    for r in rows:
+        if key in r and r[key] is not None:
+            out[str(r[key])] = r
+    return out
 
-def index_by_key(rows, key):
-    return {r.get(key): r for r in rows if key in r}
+def safe_int(x, default=0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
 
-# -------------------------------------------------
-# ENDPOINT PRINCIPAL (ANTI-TIMEOUT)
-# -------------------------------------------------
+def safe_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
 
-@app.post("/planificacion/semanal")
-def planificacion_semanal(data: BackendInput):
+# ----------------------------
+# READ STATIC DATA FROM SUPABASE
+# ----------------------------
+def fetch_table_all(table_name: str) -> List[Dict[str, Any]]:
+    # Para demo: trae todo.
+    # Si crece, aquí metemos filtros por SKUs.
+    resp = sb.table(table_name).select("*").execute()
+    return resp.data or []
 
-    start_ts = time.time()
-    log.info("=== INICIO PLANIFICACION SEMANAL (DEMO SAFE) ===")
+def fetch_static_data() -> Dict[str, Any]:
+    log.info("DB: fetching static tables from Supabase...")
 
-    # -------------------------------
-    # 1. LIMITES DE DEMO
-    # -------------------------------
-    MAX_SKUS = 5        # 🔥 LIMITE DURO
-    MAX_SECONDS = 8.0   # 🔥 LIMITE DE TIEMPO
+    # Ajusta nombres si tus tablas en Supabase se llaman distinto:
+    productos_terminados = fetch_table_all("productos_terminados")
+    componentes_empaque  = fetch_table_all("componentes_empaque")
+    materias_primas      = fetch_table_all("materias_primas")
+    bom_empaque          = fetch_table_all("bom_empaque")
+    formula_mp           = fetch_table_all("formula_mp")
+    historial_ventas     = fetch_table_all("historial_ventas")
+    mezcladoras          = fetch_table_all("mezcladoras")
+    llenadoras           = fetch_table_all("llenadoras")
 
-    # -------------------------------
-    # 2. INDEXES MINIMOS
-    # -------------------------------
-    log.info("Indexando productos terminados y componentes...")
-    pt_index = index_by_key(data.productos_terminados, "SKU")
-    comp_index = index_by_key(data.componentes_empaque, "Componente_ID")
+    log.info(
+        "DB: loaded | PT=%s | COMP=%s | MP=%s | BOM=%s | FORM=%s | VENTAS=%s | MEZ=%s | LLEN=%s",
+        len(productos_terminados),
+        len(componentes_empaque),
+        len(materias_primas),
+        len(bom_empaque),
+        len(formula_mp),
+        len(historial_ventas),
+        len(mezcladoras),
+        len(llenadoras),
+    )
 
-    bom_por_sku = {}
-    for b in data.bom_empaque:
-        sku = b.get("SKU")
+    return {
+        "productos_terminados": productos_terminados,
+        "componentes_empaque": componentes_empaque,
+        "materias_primas": materias_primas,
+        "bom_empaque": bom_empaque,
+        "formula_mp": formula_mp,
+        "historial_ventas": historial_ventas,
+        "mezcladoras": mezcladoras,
+        "llenadoras": llenadoras,
+    }
+
+# ----------------------------
+# CORE CALCS (REAL, pero enfocado a demo)
+# ----------------------------
+def calcular_demanda_neta(demanda: List[Dict[str, Any]], productos_terminados: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    pt_index = index_by_key(productos_terminados, "SKU")
+    out = []
+
+    for d in demanda:
+        sku = d["SKU"]
+        inv = safe_int(pt_index.get(sku, {}).get("Inventario", 0))
+        bruta = safe_int(d.get("demanda_bruta", 0))
+        neta = max(0, bruta - inv)
+
+        out.append({
+            "SKU": sku,
+            "Demanda_Bruta": bruta,
+            "Inventario_PT": inv,
+            "Demanda_Neta": neta
+        })
+    return out
+
+def explosion_empaque(demanda_neta: List[Dict[str, Any]], bom_empaque: List[Dict[str, Any]], componentes_empaque: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    comp_index = index_by_key(componentes_empaque, "Componente_ID")
+
+    # Agrupar BOM por SKU para hacerlo rápido
+    bom_por_sku: Dict[str, List[Dict[str, Any]]] = {}
+    for b in bom_empaque:
+        sku = str(b.get("SKU", ""))
         if sku:
             bom_por_sku.setdefault(sku, []).append(b)
 
-    # -------------------------------
-    # 3. LOOP CONTROLADO POR SKU
-    # -------------------------------
     resultado = []
-    skus_procesados = 0
+    for row in demanda_neta:
+        sku = row["SKU"]
+        neta = safe_int(row["Demanda_Neta"], 0)
 
-    for d in data.demanda:
+        if neta <= 0:
+            row["Estado_Empaque"] = "OK"
+            row["Detalle_Empaque"] = []
+            resultado.append(row)
+            continue
 
-        # ⏱️ CORTE POR TIEMPO
-        if time.time() - start_ts > MAX_SECONDS:
-            log.warning("⏱️ Corte por tiempo alcanzado")
-            break
+        componentes_sku = bom_por_sku.get(sku, [])
+        estados = []
+        detalles = []
 
-        # 🔢 CORTE POR CANTIDAD
-        if skus_procesados >= MAX_SKUS:
-            log.warning("🔢 Corte por limite de SKUs")
-            break
+        for b in componentes_sku:
+            comp_id = str(b.get("COMPONENTE_ID") or b.get("Componente_ID") or "")
+            if not comp_id:
+                estados.append("BLOQUEADO")
+                detalles.append("COMPONENTE_ID_MISSING")
+                continue
 
-        sku = d.SKU
-        demanda_bruta = d.demanda_bruta
+            comp = comp_index.get(comp_id)
+            if not comp:
+                estados.append("BLOQUEADO")
+                detalles.append(comp_id)
+                continue
 
-        log.info(f"Procesando SKU {sku}")
+            cant = safe_float(b.get("CANTIDAD_POR_UNIDAD"), 0.0)
+            requerido = cant * neta
 
-        inv_pt = int(pt_index.get(sku, {}).get("Inventario", 0))
-        demanda_neta = max(0, demanda_bruta - inv_pt)
+            inv = safe_float(comp.get("Inventario", 0))
+            en_proceso = safe_float(comp.get("En_Proceso", 0))
 
-        estado_empaque = "OK"
-        detalle_empaque = []
+            if inv >= requerido:
+                estado = "OK"
+            elif inv + en_proceso >= requerido:
+                estado = "RIESGO"
+            else:
+                estado = "BLOQUEADO"
 
-        if demanda_neta > 0:
-            for b in bom_por_sku.get(sku, []):
-                comp = comp_index.get(b.get("COMPONENTE_ID"))
-                if not comp:
-                    estado_empaque = "BLOQUEADO"
-                    detalle_empaque.append(b.get("COMPONENTE_ID"))
-                    continue
+            estados.append(estado)
+            if estado != "OK":
+                detalles.append(comp_id)
 
-                requerido = float(b.get("CANTIDAD_POR_UNIDAD", 0)) * demanda_neta
-                inv = float(comp.get("Inventario", 0))
-                en_proceso = float(comp.get("En_Proceso", 0))
+        if "BLOQUEADO" in estados:
+            row["Estado_Empaque"] = "BLOQUEADO"
+        elif "RIESGO" in estados:
+            row["Estado_Empaque"] = "RIESGO"
+        else:
+            row["Estado_Empaque"] = "OK"
 
-                if inv >= requerido:
-                    continue
-                elif inv + en_proceso >= requerido:
-                    estado_empaque = "RIESGO"
-                    detalle_empaque.append(b.get("COMPONENTE_ID"))
-                else:
-                    estado_empaque = "BLOQUEADO"
-                    detalle_empaque.append(b.get("COMPONENTE_ID"))
+        row["Detalle_Empaque"] = detalles
+        resultado.append(row)
 
-        resultado.append({
-            "SKU": sku,
-            "Demanda_Bruta": demanda_bruta,
-            "Inventario_PT": inv_pt,
-            "Demanda_Neta": demanda_neta,
-            "Estado_Empaque": estado_empaque,
-            "Detalle_Empaque": detalle_empaque
-        })
+    return resultado
 
-        skus_procesados += 1
-
-    # -------------------------------
-    # 4. RESPUESTA FINAL (RAPIDA)
-    # -------------------------------
-    elapsed = round(time.time() - start_ts, 2)
-    log.info(f"=== FIN DEMO | {skus_procesados} SKUs | {elapsed}s ===")
-
+def build_result_payload(week_start: date, week_end: date, demanda_neta: List[Dict[str, Any]], empaque: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # Para demo: devolvemos neta + estado de empaque (real).
+    # Luego extendemos a MP / mezcladoras / llenadoras.
     return {
-        "modo": "demo-safe",
-        "week_start": data.week_start,
-        "week_end": data.week_end,
-        "skus_procesados": skus_procesados,
-        "tiempo_segundos": elapsed,
-        "resultado": resultado,
-        "nota": "Procesamiento limitado para evitar timeout. Mezcladoras, llenadoras y MP desactivadas."
+        "week": {"start": str(week_start), "end": str(week_end)},
+        "demanda_neta": demanda_neta,
+        "empaque": empaque,
+        "nota": "Cálculo real: demanda neta + explosión de empaque. MP/mezcladoras/llenadoras se activan después."
     }
+
+# ----------------------------
+# JOB WORKER (BACKGROUND)
+# ----------------------------
+async def process_job(job_id: str):
+    log.info("JOB %s | start", job_id)
+    try:
+        # marcar processing
+        sb.table("planificacion_jobs").update({"status": "processing"}).eq("job_id", job_id).execute()
+        sb.table("planificacion_jobs").update({"started_at": "now()"}).eq("job_id", job_id).execute()
+
+        # leer job
+        job = sb.table("planificacion_jobs").select("*").eq("job_id", job_id).single().execute().data
+        if not job:
+            raise RuntimeError("job not found")
+
+        week_start = date.fromisoformat(job["week_start"])
+        week_end = date.fromisoformat(job["week_end"])
+        demanda = job["demanda"] or []
+
+        log.info("JOB %s | input | week=%s..%s | demanda_items=%s", job_id, week_start, week_end, len(demanda))
+
+        # 1) cargar estáticos desde Supabase
+        static = await asyncio.to_thread(fetch_static_data)
+
+        # 2) cálculos
+        demanda_neta = await asyncio.to_thread(calcular_demanda_neta, demanda, static["productos_terminados"])
+        empaque = await asyncio.to_thread(explosion_empaque, demanda_neta, static["bom_empaque"], static["componentes_empaque"])
+        resultado = await asyncio.to_thread(build_result_payload, week_start, week_end, demanda_neta, empaque)
+
+        # 3) guardar resultado
+        sb.table("planificacion_resultados").upsert({
+            "job_id": job_id,
+            "resultado": resultado
+        }).execute()
+
+        # marcar done
+        sb.table("planificacion_jobs").update({
+            "status": "done",
+            "finished_at": "now()",
+            "error_message": None
+        }).eq("job_id", job_id).execute()
+
+        log.info("JOB %s | done", job_id)
+
+    except Exception as e:
+        log.exception("JOB %s | error", job_id)
+        sb.table("planificacion_jobs").update({
+            "status": "error",
+            "finished_at": "now()",
+            "error_message": str(e)
+        }).eq("job_id", job_id).execute()
+
+# ----------------------------
+# API ENDPOINTS
+# ----------------------------
+@app.post("/planificacion/semanal")
+def planificacion_semanal(payload: BackendInputMin):
+    # 1) guardar job en Supabase (rápido)
+    demanda_list = [{"SKU": d.SKU, "demanda_bruta": d.demanda_bruta} for d in payload.demanda]
+
+    insert = sb.table("planificacion_jobs").insert({
+        "week_start": str(payload.week_start),
+        "week_end": str(payload.week_end),
+        "demanda": demanda_list,
+        "status": "queued"
+    }).execute()
+
+    job_id = insert.data[0]["job_id"]
+    log.info("API: created job %s", job_id)
+
+    # 2) disparar background task (no bloquea el request)
+    asyncio.create_task(process_job(str(job_id)))
+
+    # 3) responder inmediato
+    return {"job_id": job_id, "status": "queued"}
+
+@app.get("/planificacion/resultado/{job_id}")
+def planificacion_resultado(job_id: UUID):
+    # devolver status primero
+    job = sb.table("planificacion_jobs").select("job_id,status,error_message,week_start,week_end").eq("job_id", str(job_id)).single().execute().data
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    status = job["status"]
+    if status == "done":
+        res = sb.table("planificacion_resultados").select("resultado").eq("job_id", str(job_id)).single().execute().data
+        return {"job": job, "resultado": (res or {}).get("resultado")}
+    elif status == "error":
+        return {"job": job}
+    else:
+        return {"job": job}
