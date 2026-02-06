@@ -1,9 +1,9 @@
 import os
 import logging
 import asyncio
-from datetime import date
-from typing import List, Dict, Any, Optional
-from uuid import UUID
+from datetime import date, datetime, timezone
+from typing import List, Dict, Any
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -47,9 +47,12 @@ class BackendInputMin(BaseModel):
 # ----------------------------
 # HELPERS
 # ----------------------------
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
 def index_by_key(rows: List[Dict[str, Any]], key: str) -> Dict[str, Dict[str, Any]]:
-    out = {}
-    for r in rows:
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows or []:
         if key in r and r[key] is not None:
             out[str(r[key])] = r
     return out
@@ -70,15 +73,13 @@ def safe_float(x, default=0.0) -> float:
 # READ STATIC DATA FROM SUPABASE
 # ----------------------------
 def fetch_table_all(table_name: str) -> List[Dict[str, Any]]:
-    # Para demo: trae todo.
-    # Si crece, aquí metemos filtros por SKUs.
     resp = sb.table(table_name).select("*").execute()
     return resp.data or []
 
 def fetch_static_data() -> Dict[str, Any]:
     log.info("DB: fetching static tables from Supabase...")
 
-    # Ajusta nombres si tus tablas en Supabase se llaman distinto:
+    # Nombres EXACTOS en Supabase:
     productos_terminados = fetch_table_all("productos_terminados")
     componentes_empaque  = fetch_table_all("componentes_empaque")
     materias_primas      = fetch_table_all("materias_primas")
@@ -116,10 +117,10 @@ def fetch_static_data() -> Dict[str, Any]:
 # ----------------------------
 def calcular_demanda_neta(demanda: List[Dict[str, Any]], productos_terminados: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     pt_index = index_by_key(productos_terminados, "SKU")
-    out = []
+    out: List[Dict[str, Any]] = []
 
-    for d in demanda:
-        sku = d["SKU"]
+    for d in demanda or []:
+        sku = str(d.get("SKU", "")).strip()
         inv = safe_int(pt_index.get(sku, {}).get("Inventario", 0))
         bruta = safe_int(d.get("demanda_bruta", 0))
         neta = max(0, bruta - inv)
@@ -133,19 +134,20 @@ def calcular_demanda_neta(demanda: List[Dict[str, Any]], productos_terminados: L
     return out
 
 def explosion_empaque(demanda_neta: List[Dict[str, Any]], bom_empaque: List[Dict[str, Any]], componentes_empaque: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Ajuste de key: en tu Google Sheet y backend viejo aparece "Componente_ID"
+    # pero en BOM aparece "COMPONENTE_ID". Cubrimos ambos.
     comp_index = index_by_key(componentes_empaque, "Componente_ID")
 
-    # Agrupar BOM por SKU para hacerlo rápido
     bom_por_sku: Dict[str, List[Dict[str, Any]]] = {}
-    for b in bom_empaque:
-        sku = str(b.get("SKU", ""))
+    for b in bom_empaque or []:
+        sku = str(b.get("SKU", "")).strip()
         if sku:
             bom_por_sku.setdefault(sku, []).append(b)
 
-    resultado = []
-    for row in demanda_neta:
-        sku = row["SKU"]
-        neta = safe_int(row["Demanda_Neta"], 0)
+    resultado: List[Dict[str, Any]] = []
+    for row in demanda_neta or []:
+        sku = str(row.get("SKU", "")).strip()
+        neta = safe_int(row.get("Demanda_Neta", 0), 0)
 
         if neta <= 0:
             row["Estado_Empaque"] = "OK"
@@ -154,11 +156,11 @@ def explosion_empaque(demanda_neta: List[Dict[str, Any]], bom_empaque: List[Dict
             continue
 
         componentes_sku = bom_por_sku.get(sku, [])
-        estados = []
-        detalles = []
+        estados: List[str] = []
+        detalles: List[str] = []
 
         for b in componentes_sku:
-            comp_id = str(b.get("COMPONENTE_ID") or b.get("Componente_ID") or "")
+            comp_id = str(b.get("COMPONENTE_ID") or b.get("Componente_ID") or "").strip()
             if not comp_id:
                 estados.append("BLOQUEADO")
                 detalles.append("COMPONENTE_ID_MISSING")
@@ -200,8 +202,6 @@ def explosion_empaque(demanda_neta: List[Dict[str, Any]], bom_empaque: List[Dict
     return resultado
 
 def build_result_payload(week_start: date, week_end: date, demanda_neta: List[Dict[str, Any]], empaque: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # Para demo: devolvemos neta + estado de empaque (real).
-    # Luego extendemos a MP / mezcladoras / llenadoras.
     return {
         "week": {"start": str(week_start), "end": str(week_end)},
         "demanda_neta": demanda_neta,
@@ -215,9 +215,11 @@ def build_result_payload(week_start: date, week_end: date, demanda_neta: List[Di
 async def process_job(job_id: str):
     log.info("JOB %s | start", job_id)
     try:
-        # marcar processing
-        sb.table("planificacion_jobs").update({"status": "processing"}).eq("job_id", job_id).execute()
-        sb.table("planificacion_jobs").update({"started_at": "now()"}).eq("job_id", job_id).execute()
+        # marcar processing + timestamps (sin now() server-side para evitar problemas)
+        sb.table("planificacion_jobs").update({
+            "status": "processing",
+            "started_at": utc_now_iso()
+        }).eq("job_id", job_id).execute()
 
         # leer job
         job = sb.table("planificacion_jobs").select("*").eq("job_id", job_id).single().execute().data
@@ -226,11 +228,11 @@ async def process_job(job_id: str):
 
         week_start = date.fromisoformat(job["week_start"])
         week_end = date.fromisoformat(job["week_end"])
-        demanda = job["demanda"] or []
+        demanda = job.get("demanda") or []
 
         log.info("JOB %s | input | week=%s..%s | demanda_items=%s", job_id, week_start, week_end, len(demanda))
 
-        # 1) cargar estáticos desde Supabase
+        # 1) cargar estáticos desde Supabase (thread para no bloquear)
         static = await asyncio.to_thread(fetch_static_data)
 
         # 2) cálculos
@@ -241,13 +243,14 @@ async def process_job(job_id: str):
         # 3) guardar resultado
         sb.table("planificacion_resultados").upsert({
             "job_id": job_id,
-            "resultado": resultado
+            "resultado": resultado,
+            "updated_at": utc_now_iso()
         }).execute()
 
         # marcar done
         sb.table("planificacion_jobs").update({
             "status": "done",
-            "finished_at": "now()",
+            "finished_at": utc_now_iso(),
             "error_message": None
         }).eq("job_id", job_id).execute()
 
@@ -257,7 +260,7 @@ async def process_job(job_id: str):
         log.exception("JOB %s | error", job_id)
         sb.table("planificacion_jobs").update({
             "status": "error",
-            "finished_at": "now()",
+            "finished_at": utc_now_iso(),
             "error_message": str(e)
         }).eq("job_id", job_id).execute()
 
@@ -265,38 +268,50 @@ async def process_job(job_id: str):
 # API ENDPOINTS
 # ----------------------------
 @app.post("/planificacion/semanal")
-def planificacion_semanal(payload: BackendInputMin):
-    # 1) guardar job en Supabase (rápido)
+async def planificacion_semanal(payload: BackendInputMin):
+    # 1) crear job_id en backend (NO dependemos de returning)
+    job_id = str(uuid4())
+
     demanda_list = [{"SKU": d.SKU, "demanda_bruta": d.demanda_bruta} for d in payload.demanda]
 
-    insert = sb.table("planificacion_jobs").insert({
+    sb.table("planificacion_jobs").insert({
+        "job_id": job_id,
         "week_start": str(payload.week_start),
         "week_end": str(payload.week_end),
         "demanda": demanda_list,
-        "status": "queued"
+        "status": "queued",
+        "created_at": utc_now_iso()
     }).execute()
 
-    job_id = insert.data[0]["job_id"]
-    log.info("API: created job %s", job_id)
+    log.info("API: created job %s | demand_items=%s", job_id, len(demanda_list))
 
-    # 2) disparar background task (no bloquea el request)
-    asyncio.create_task(process_job(str(job_id)))
+    # 2) background task (no bloquea el request)
+    asyncio.create_task(process_job(job_id))
 
     # 3) responder inmediato
     return {"job_id": job_id, "status": "queued"}
 
 @app.get("/planificacion/resultado/{job_id}")
 def planificacion_resultado(job_id: UUID):
-    # devolver status primero
-    job = sb.table("planificacion_jobs").select("job_id,status,error_message,week_start,week_end").eq("job_id", str(job_id)).single().execute().data
+    job = sb.table("planificacion_jobs") \
+        .select("job_id,status,error_message,week_start,week_end,created_at,started_at,finished_at") \
+        .eq("job_id", str(job_id)) \
+        .single() \
+        .execute() \
+        .data
+
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
 
-    status = job["status"]
+    status = job.get("status")
+
     if status == "done":
-        res = sb.table("planificacion_resultados").select("resultado").eq("job_id", str(job_id)).single().execute().data
+        res = sb.table("planificacion_resultados") \
+            .select("resultado") \
+            .eq("job_id", str(job_id)) \
+            .single() \
+            .execute() \
+            .data
         return {"job": job, "resultado": (res or {}).get("resultado")}
-    elif status == "error":
-        return {"job": job}
-    else:
-        return {"job": job}
+
+    return {"job": job}
